@@ -23,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 import scala.jdk.CollectionConverters._
 
 import org.apache.spark.sql.catalyst.analysis.{NamespaceAlreadyExistsException, NonEmptyNamespaceException, NoSuchNamespaceException, NoSuchTableException, TableAlreadyExistsException}
+import org.apache.spark.sql.connector.catalog.TableCatalog.TableBuilder
 import org.apache.spark.sql.connector.distributions.{Distribution, Distributions}
 import org.apache.spark.sql.connector.expressions.{SortOrder, Transform}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -248,6 +249,51 @@ class InMemoryTableCatalog extends BasicInMemoryTableCatalog with SupportsNamesp
       super.listTables(namespace)
     } else {
       throw new NoSuchNamespaceException(name() +: namespace)
+    }
+  }
+
+  override def buildTable(ident: Identifier, columns: Array[Column]): TableBuilder = {
+    new BasicInMemoryTableBuilder(ident, columns, namespaces, tables)
+  }
+
+  private class BasicInMemoryTableBuilder(
+      val ident: Identifier,
+      val columns: Array[Column],
+      val namespaces: util.Map[List[String], Map[String, String]],
+      val tables: util.Map[Identifier, Table])
+    extends TableBuilder {
+    import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
+
+    private val properties: util.Map[String, String] = new util.HashMap();
+    private var partitions: Array[Transform] = Array.empty;
+
+    override def withPartitions(partitions: Array[Transform]): TableBuilder = {
+      if (partitions != null && partitions.nonEmpty) {
+        this.partitions = partitions
+      }
+      this
+    }
+
+    override def withProperties(properties: util.Map[String, String]): TableBuilder = {
+      if (properties != null) {
+        this.properties.putAll(properties)
+      }
+      this
+    }
+
+    override def create(): Table = {
+      if (tables.containsKey(ident)) {
+        throw new TableAlreadyExistsException(ident.asMultipartIdentifier)
+      }
+
+      val schema = CatalogV2Util.v2ColumnsToStructType(columns)
+      val tableName = s"$name.${ident.quoted}"
+
+      val table = new InMemoryTable(tableName, schema, partitions, properties)
+      tables.put(ident, table)
+      namespaces.putIfAbsent(ident.namespace.toList, Map())
+
+      table
     }
   }
 }
